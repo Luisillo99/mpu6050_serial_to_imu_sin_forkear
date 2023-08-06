@@ -3,6 +3,7 @@
 #include <serial/serial.h>
 #include <sensor_msgs/Imu.h>
 #include <sensor_msgs/Temperature.h>
+#include <sensor_msgs/TimeReference.h>
 #include <std_msgs/String.h>
 #include <std_srvs/Empty.h>
 #include <string>
@@ -34,7 +35,8 @@ int main(int argc, char** argv)
   uint8_t last_received_message_number;
   bool received_message = false;
   int data_packet_start;
-
+  uint32_t lastTriggerCounter = 0;
+  
   tf::Quaternion orientation;
   tf::Quaternion zero_orientation;
 
@@ -54,11 +56,13 @@ int main(int argc, char** argv)
   ros::NodeHandle nh("imu");
   ros::Publisher imu_pub = nh.advertise<sensor_msgs::Imu>("data", 50);
   ros::Publisher imu_temperature_pub = nh.advertise<sensor_msgs::Temperature>("temperature", 50);
+  ros::Publisher trigger_time_pub = nh.advertise<sensor_msgs::TimeReference>("trigger_time", 50);
   ros::ServiceServer service = nh.advertiseService("set_zero_orientation", set_zero_orientation);
 
   ros::Rate r(200); // 200 hz
 
   sensor_msgs::Imu imu;
+  sensor_msgs::TimeReference trigger_time_msg;
 
   imu.linear_acceleration_covariance[0] = linear_acceleration_stddev;
   imu.linear_acceleration_covariance[4] = linear_acceleration_stddev;
@@ -94,14 +98,14 @@ int main(int argc, char** argv)
           read = ser.read(ser.available());
           ROS_DEBUG("read %i new characters from serial port, adding to %i characters of old input.", (int)read.size(), (int)input.size());
           input += read;
-          while (input.length() >= 28) // while there might be a complete package in input
+          while (input.length() >= 32) // while there might be a complete package in input
           {
             //parse for data packets
             data_packet_start = input.find("$\x03");
             if (data_packet_start != std::string::npos)
             {
               ROS_DEBUG("found possible start of data packet at position %d", data_packet_start);
-              if ((input.length() >= data_packet_start + 28) && (input.compare(data_packet_start + 26, 2, "\r\n") == 0))  //check if positions 26,27 exist, then test values
+              if ((input.length() >= data_packet_start + 32) && (input.compare(data_packet_start + 31, 1, "\n") == 0))
               {
                 ROS_DEBUG("seems to be a real data package: long enough and found end characters");
                 // get quaternion values
@@ -151,11 +155,20 @@ int main(int argc, char** argv)
                 double azf = az * (8.0 / 65536.0) * 9.81;
 
                 // get temperature
-                int16_t temperature = (((0xff &(char)input[data_packet_start + 22]) << 8) | 0xff &(char)input[data_packet_start + 23]);
-                double temperature_in_C = (temperature / 340.0 ) + 36.53;
-                ROS_DEBUG_STREAM("Temperature [in C] " << temperature_in_C);
-
-                uint8_t received_message_number = input[data_packet_start + 25];
+                //int16_t temperature = (((0xff &(char)input[data_packet_start + 22]) << 8) | 0xff &(char)input[data_packet_start + 23]);
+                //double temperature_in_C = (temperature / 340.0 ) + 36.53;
+                double temperature_in_C = 28.5;
+                //ROS_DEBUG_STREAM("Temperature [in C] " << temperature_in_C);
+		        
+		// get timeStamp
+        	      uint32_t timeStamp = (((0xff &(char)input[data_packet_start + 22]) << 24) | ((0xff &(char)input[data_packet_start + 23]) << 16) | ((0xff &(char)input[data_packet_start + 24]) << 8) | ((0xff &(char)input[data_packet_start + 25])));
+		
+		// get triggerCounter
+              	uint32_t triggerCounter = (((0xff &(char)input[data_packet_start + 26]) << 24) | ((0xff &(char)input[data_packet_start + 27]) << 16) | ((0xff &(char)input[data_packet_start + 28]) << 8) | ((0xff &(char)input[data_packet_start + 29])));    
+		 
+		 
+		 // get message number 
+                uint8_t received_message_number = input[data_packet_start + 30];
                 ROS_DEBUG("received message number: %i", received_message_number);
 
                 if (received_message) // can only check for continuous numbers if already received at least one packet
@@ -173,8 +186,20 @@ int main(int argc, char** argv)
                 last_received_message_number = received_message_number;
 
                 // calculate measurement time
-                ros::Time measurement_time = ros::Time::now() + ros::Duration(time_offset_in_seconds);
-
+                //ros::Time measurement_time = ros::Time::now() + ros::Duration(time_offset_in_seconds);//Esta línea es la que hay que checar para sincronizar las ts.
+ 		// verificar si es necesario añadir un offset a los timestamps para que el número sea más grande y concuerde con unix epoch time
+                
+ros::Time measurement_time(timeStamp / 1000, (timeStamp % 1000) * 1000*1000);  // sec, nsec       
+                ROS_INFO_STREAM("IMU TriggerCounter: " << triggerCounter);
+                if (triggerCounter-lastTriggerCounter == 1){
+                  ros::Time time_ref(0, 0);
+                  trigger_time_msg.header.frame_id = frame_id;
+                  trigger_time_msg.header.stamp = measurement_time;
+                  trigger_time_msg.time_ref = time_ref;
+                  trigger_time_pub.publish(trigger_time_msg);
+                }
+                lastTriggerCounter = triggerCounter;
+                
                 // publish imu message
                 imu.header.stamp = measurement_time;
                 imu.header.frame_id = frame_id;

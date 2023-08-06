@@ -82,6 +82,7 @@ MPU6050 mpu;
 
 #define INTERRUPT_PIN 2  // use pin 2 on Arduino Uno & most boards
 #define LED_PIN 13 // (Arduino is 13, Teensy is 11, Teensy++ is 6)
+#define TRIGGER_PIN 5 // use pin 5 to trigger camera
 bool blinkState = false;
 
 // MPU control/status vars
@@ -101,8 +102,9 @@ VectorFloat gravity;    // [x, y, z]            gravity vector
 float euler[3];         // [psi, theta, phi]    Euler angle container
 float ypr[3];           // [yaw, pitch, roll]   yaw/pitch/roll container and gravity vector
 
-// packet structure for InvenSense teapot demo
-uint8_t teapotPacket[28] = { '$', 0x03, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, 0x00, 0x00, '\r', '\n' };
+// packet structure for InvenSense teapot demo                                                    
+//                                     |      quaternion      |      gyro       |      accel      |  time  | trigg  | count|   
+uint8_t teapotPacket[32] = { '$', 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,0,0,0, 0,0,0,0, 0x00, '\n' };
 
 
 
@@ -111,7 +113,20 @@ uint8_t teapotPacket[28] = { '$', 0x03, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, 0,0, 
 // ================================================================
 
 volatile bool mpuInterrupt = false;     // indicates whether MPU interrupt pin has gone high
+volatile unsigned long irqTimestamp = 0;
+volatile unsigned long triggerCounter = 0;
+volatile byte irqCounter = 0;
+
+
 void dmpDataReady() {
+    irqTimestamp = millis();
+    irqCounter++;
+    if (irqCounter == 5){ // trigger cam @20 Hz
+      digitalWrite(TRIGGER_PIN, HIGH);
+      digitalWrite(TRIGGER_PIN, LOW);
+      triggerCounter++;
+      irqCounter = 0;   
+    } 
     mpuInterrupt = true;
 }
 
@@ -146,7 +161,7 @@ void setup() {
     Serial.println(F("Initializing I2C devices..."));
     mpu.initialize();
     pinMode(INTERRUPT_PIN, INPUT);
-
+    pinMode(TRIGGER_PIN, OUTPUT);
     // verify connection
     Serial.println(F("Testing device connections..."));
     Serial.println(mpu.testConnection() ? F("MPU6050 connection successful") : F("MPU6050 connection failed"));
@@ -156,12 +171,12 @@ void setup() {
     devStatus = mpu.dmpInitialize();
 
     // supply your own gyro offsets here, scaled for min sensitivity
-    mpu.setXAccelOffset(-1169);
-    mpu.setYAccelOffset(744);
-    mpu.setZAccelOffset(1620);
-    mpu.setXGyroOffset(48);
-    mpu.setYGyroOffset(47);
-    mpu.setZGyroOffset(-8);
+    mpu.setXAccelOffset(-1307);
+    mpu.setYAccelOffset(87);
+    mpu.setZAccelOffset(1689);
+    mpu.setXGyroOffset(72);
+    mpu.setYGyroOffset(12);
+    mpu.setZGyroOffset(-33);
 
     // make sure it worked (returns 0 if so)
     if (devStatus == 0) {
@@ -192,6 +207,7 @@ void setup() {
 
     // configure LED for output
     pinMode(LED_PIN, OUTPUT);
+    // delay(10000);
 }
 
 
@@ -267,11 +283,21 @@ void loop() {
         teapotPacket[20] = fifoBuffer[36];
         teapotPacket[21] = fifoBuffer[37];
         //temperature
-        int16_t temperature = mpu.getTemperature();
-        teapotPacket[22] = temperature >> 8;
-        teapotPacket[23] = temperature & 0xFF;
-        Serial.write(teapotPacket, 28);
-        teapotPacket[25]++; // packetCount, loops at 0xFF on purpose
+//        int16_t temperature = mpu.getTemperature();
+//        teapotPacket[22] = temperature >> 8;
+//        teapotPacket[23] = temperature & 0xFF;
+        //timestamp 
+        teapotPacket[22] = irqTimestamp >> 24;
+        teapotPacket[23] = (irqTimestamp >> 16) & 0xFF;
+        teapotPacket[24] = (irqTimestamp >> 8) & 0xFF;
+        teapotPacket[25] = irqTimestamp & 0xFF;
+        //triggercounter
+        teapotPacket[26] = triggerCounter >> 24;
+        teapotPacket[27] = (triggerCounter >> 16) & 0xFF;
+        teapotPacket[28] = (triggerCounter >> 8) & 0xFF;
+        teapotPacket[29] = triggerCounter & 0xFF;
+        Serial.write(teapotPacket, 32);
+        teapotPacket[30]++; // packetCount, loops at 0xFF on purpose
 
         // blink LED to indicate activity
         blinkState = !blinkState;
